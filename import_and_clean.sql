@@ -1,44 +1,33 @@
--- SQL Project (PostgreSQL)
--- Data cleaning and preparation for analysis
-
-
--- 
--- 1. Import data (https://www.kaggle.com/datasets/swaptr/layoffs-2022)
+-- Drop schema if exists and recreate for isolation
 DROP SCHEMA IF EXISTS world_layoffs CASCADE;
 CREATE SCHEMA world_layoffs;
-CREATE TABLE world_layoffs.layoffs_raw(
-company text,
-location text,
-industry text,
-total_laid_off text,
-percentage_laid_off text,
-date text,
-stage text,
-country text,
-funds_raised_millions text
+
+-- Create raw table for importing data
+CREATE TABLE world_layoffs.layoffs_raw (
+    company TEXT,
+    location TEXT,
+    industry TEXT,
+    total_laid_off TEXT,
+    percentage_laid_off TEXT,
+    date TEXT,
+    stage TEXT,
+    country TEXT,
+    funds_raised_millions TEXT
 );
+
+-- Import raw data
 COPY world_layoffs.layoffs_raw
 FROM '/Users/sean/Desktop/DataAnalysis/csvs/layoffs.csv'
 DELIMITER ','
-HEADER
-csv;
+CSV HEADER;
 
-SELECT *
-FROM world_layoffs.layoffs_raw
-LIMIT 10
-
--- 
--- 2. Create staging table to preserve raw data
+-- Create a staging table to preserve raw data
 DROP TABLE IF EXISTS world_layoffs.layoffs_staging;
 CREATE TABLE world_layoffs.layoffs_staging AS
-TABLE world_layoffs.layoffs_raw;
-
 SELECT *
-FROM world_layoffs.layoffs_staging
-LIMIT 10
+FROM world_layoffs.layoffs_raw;
 
--- 
--- 3. Remove duplicates
+-- Remove duplicates
 DELETE FROM world_layoffs.layoffs_staging
 USING (
     SELECT ctid
@@ -55,41 +44,66 @@ USING (
 ) AS duplicates_cte
 WHERE world_layoffs.layoffs_staging.ctid = duplicates_cte.ctid;
 
--- 
--- 4. Standardize data
-	--4a. Remove whitespace from company names
+
+-- Standardize data
+
+-- Trim whitespace from company names
 UPDATE world_layoffs.layoffs_staging
 SET company = TRIM(company);
-	--4b. Condense similar industry names
+
+-- Condense similar industry names and replace blanks with NULL
 UPDATE world_layoffs.layoffs_staging
 SET industry = 'Crypto'
-WHERE industry LIKE 'Crypto%'
-	--4c. Find and correct country names
+WHERE industry ILIKE 'Crypto%';
+
+UPDATE world_layoffs.layoffs_staging
+SET industry = NULL
+WHERE industry = '';
+
+-- Join table with itself to fill in null industries from same company with info
+WITH fill_industries AS (
+	SELECT 
+		t1.ctid AS target_id,
+		t2.industry AS new_industry
+	FROM world_layoffs.layoffs_staging t1
+    JOIN world_layoffs.layoffs_staging t2
+    	ON t1.company = t2.company
+    WHERE t1.industry IS NULL
+    	AND t2.industry IS NOT NULL 
+)
+UPDATE world_layoffs.layoffs_staging
+SET industry = fill_industries.new_industry
+FROM fill_industries
+WHERE world_layoffs.layoffs_staging.ctid = fill_industries.target_id;
+
+-- Normalize country names
 UPDATE world_layoffs.layoffs_staging
 SET country = TRIM(TRAILING '.' FROM country)
-WHERE country LIKE 'United States%'
+WHERE country ILIKE 'United States%';
 
-	--4d. Format date column (I hate regex but I'm learning)
+-- Clean and format date column
+-- Replace literal "NULL" strings with actual NULL
 UPDATE world_layoffs.layoffs_staging
 SET date = NULL
-WHERE NOT date ~ '^\d{2}/\d{2}/\d{4}$';
+WHERE date ILIKE 'NULL';
 
+-- Add a new column for cleaned dates
+ALTER TABLE world_layoffs.layoffs_staging ADD COLUMN date_clean DATE;
+
+-- Convert valid date strings to DATE type
 UPDATE world_layoffs.layoffs_staging
-SET date = TO_DATE(date, 'MM/DD/YYYY');
+SET date_clean = TO_DATE(date, 'MM/DD/YYYY');
 
-ALTER TABLE world_layoffs.layoffs_staging RENAME COLUMN date TO date_backup;
-ALTER TABLE world_layoffs.layoffs_staging ADD COLUMN date DATE;
-UPDATE world_layoffs.layoffs_staging
-SET date = TO_DATE(date_backup, 'MM/DD/YYYY');
---verify changed to date data type
-SELECT column_name, data_type
-FROM information_schema.columns
-WHERE table_name = 'layoffs_staging' AND table_schema = 'world_layoffs' and column_name = 'date';
+-- Drop old text-based date column
+ALTER TABLE world_layoffs.layoffs_staging DROP COLUMN date;
+ALTER TABLE world_layoffs.layoffs_staging RENAME COLUMN date_clean TO date;
 
+-- Drop useless data with multiple null columns
+DELETE FROM world_layoffs.layoffs_staging
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
 
-
-ALTER TABLE world_layoffs.layoffs_staging DROP COLUMN date_backup;
-
+-- View cleaned and prepared data
 SELECT *
 FROM world_layoffs.layoffs_staging
-LIMIT 100
+LIMIT 100;
